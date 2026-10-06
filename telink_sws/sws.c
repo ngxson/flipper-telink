@@ -5,6 +5,7 @@
 static const GpioPin* sws_pin = &gpio_ext_pc0;
 static uint32_t unit_cyc = 2 * CPU_MHZ; /* 2 us */
 static SwsRxDebug rx_dbg;
+static volatile uint32_t link_ok_tick, link_fail_tick;
 
 /* fast pin access */
 static GPIO_TypeDef* g_port;
@@ -202,6 +203,12 @@ size_t sws_read(uint32_t addr, uint8_t* data, size_t len) {
     }
     tx_byte(0xff, true);
     bus_end();
+    if(len) {
+        if(i == len)
+            link_ok_tick = furi_get_tick();
+        else
+            link_fail_tick = furi_get_tick();
+    }
     return i;
 }
 
@@ -214,6 +221,11 @@ size_t sws_read_fifo(uint32_t addr, uint8_t* data, size_t len) {
 
 const SwsRxDebug* sws_last_rx_debug(void) {
     return &rx_dbg;
+}
+
+void sws_link_ticks(uint32_t* last_ok, uint32_t* last_fail) {
+    *last_ok = link_ok_tick;
+    *last_fail = link_fail_tick;
 }
 
 /* --- TLSR825x helpers ----------------------------------------------------- */
@@ -233,6 +245,9 @@ void sws_cpu_run(void) {
 }
 
 static void spi_cmd_addr(uint8_t cmd, uint32_t addr) {
+    /* CS high first: a CS-high write lost to a contact glitch must not turn
+     * this command into the tail of the previous transfer */
+    sws_write_u8(REG_SPI_CTRL, SPI_CS);
     sws_write_u8(REG_SPI_CTRL, 0x00); /* CS low */
     sws_write_u8(REG_SPI_DATA, cmd);
     sws_write_u8(REG_SPI_DATA, (addr >> 16) & 0xff);
@@ -255,6 +270,7 @@ size_t sws_flash_read(uint32_t faddr, uint8_t* buf, size_t len) {
 }
 
 bool sws_flash_jedec(uint8_t id[3]) {
+    sws_write_u8(REG_SPI_CTRL, SPI_CS);
     sws_write_u8(REG_SPI_CTRL, 0x00);
     sws_write_u8(REG_SPI_DATA, 0x9f);
     spi_auto_read();
@@ -275,6 +291,15 @@ bool sws_flash_read_status(uint8_t* st) {
     return n == 1;
 }
 
+bool sws_flash_read_status2(uint8_t* st) {
+    sws_write_u8(REG_SPI_CTRL, 0x00);
+    sws_write_u8(REG_SPI_DATA, 0x35);
+    spi_auto_read();
+    size_t n = sws_read_fifo(REG_SPI_DATA, st, 1);
+    sws_write_u8(REG_SPI_CTRL, SPI_CS);
+    return n == 1;
+}
+
 bool sws_flash_busy(void) {
     uint8_t st = 0xff;
     return !sws_flash_read_status(&st) || (st & 0x01); /* WIP */
@@ -285,6 +310,17 @@ void sws_flash_write_enable(void) {
     sws_write_u8(REG_SPI_CTRL, 0x00); /* CS low */
     sws_write_u8(REG_SPI_DATA, 0x06);
     sws_write_u8(REG_SPI_CTRL, SPI_CS);
+}
+
+/* write status register (0x01): clears/sets the block protect bits */
+bool sws_flash_write_status(const uint8_t* sr, size_t n) {
+    sws_flash_write_enable();
+    sws_write_u8(REG_SPI_CTRL, 0x00); /* CS low */
+    sws_write_u8(REG_SPI_DATA, 0x01);
+    for(size_t i = 0; i < n; i++)
+        sws_write_u8(REG_SPI_DATA, sr[i]);
+    sws_write_u8(REG_SPI_CTRL, SPI_CS);
+    return sws_flash_wait_ready(200);
 }
 
 /* poll the status register until not busy (or timeout in ms) */

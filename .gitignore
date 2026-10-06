@@ -11,10 +11,10 @@ __pycache__/
 *.fap
 *.map
 *.lst
-custom_fw/build
-custom_fw/bin
-custom_fw/tools
-custom_fw/tc32_gcc_v2.0.tar.bz2
+custom_fw/*/build
+custom_fw/*/bin
+custom_fw/*/tools
+custom_fw/*/tc32_gcc_v2.0.tar.bz2
 
 # raw dumps contain Zigbee network keys: never commit
 dumps/private

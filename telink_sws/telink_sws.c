@@ -1,6 +1,7 @@
 #include <furi.h>
 #include <furi_hal.h>
 #include <gui/gui.h>
+#include <notification/notification_messages.h>
 #include <cli/cli.h>
 #include <toolbox/cli/cli_command.h>
 #include <toolbox/pipe.h>
@@ -26,11 +27,26 @@ static const PinDef pins[] = {
 };
 #define PIN_COUNT (sizeof(pins) / sizeof(pins[0]))
 
+/* live contact state shown on screen / LED */
+typedef enum {
+    LinkNone, /* line floats: wire not touching anything */
+    LinkLow, /* line held low */
+    LinkPad, /* something pulls the line up but SWS does not answer (chip asleep?) */
+    LinkGood, /* SWS answers */
+} LinkState;
+
 typedef struct {
     FuriMutex* lock;
     uint8_t slave_div;
     uint32_t act_ms;
     char status[32];
+    /* contact monitor (GUI thread) */
+    bool auto_halt;
+    volatile LinkState link;
+    volatile bool busy; /* a CLI command holds the bus */
+    uint16_t chip_id;
+    bool halted;
+    uint32_t good_probes, total_probes;
 } App;
 
 /* ---------- helpers ---------- */
@@ -84,15 +100,115 @@ static void power_set(bool on) {
     }
 }
 
+/* ---------- contact monitor ---------- */
+
+/* Electrical check of the SWS line when the protocol gets no answer.
+ * Discharge with the pull-down, release, and time the rise: a floating wire
+ * keeps its charge for a long time, the chip's pad pull-up recharges it fast. */
+static LinkState line_check(void) {
+    const GpioPin* p = sws_get_pin();
+    LinkState st;
+    furi_hal_gpio_init(p, GpioModeInput, GpioPullUp, GpioSpeedLow);
+    furi_delay_us(200);
+    if(!furi_hal_gpio_read(p)) {
+        st = LinkLow;
+    } else {
+        furi_hal_gpio_init(p, GpioModeInput, GpioPullDown, GpioSpeedLow);
+        furi_delay_us(500);
+        furi_hal_gpio_init(p, GpioModeInput, GpioPullNo, GpioSpeedLow);
+        uint32_t t0 = DWT->CYCCNT;
+        st = LinkNone;
+        while(DWT->CYCCNT - t0 < 2000u * 64u) { /* 2 ms */
+            if(furi_hal_gpio_read(p)) {
+                st = LinkPad;
+                break;
+            }
+        }
+    }
+    sws_pin_idle();
+    return st;
+}
+
+/* one probe of the target; caller holds app->lock */
+static LinkState link_probe(App* app) {
+    uint8_t id[3];
+    /* the slave RX is ratio based, so this write lands whatever the target's
+     * current divider is; firmware may have set a reply speed we cannot sample */
+    sws_write_u8(0x00b2, app->slave_div);
+    if(sws_read(0x007d, id, 3) != 3 && app->auto_halt) {
+        /* chip may be waking up (button press): try to halt it */
+        uint32_t t0 = furi_get_tick();
+        while(furi_get_tick() - t0 < 20) {
+            sws_cpu_stop();
+            sws_write_u8(0x00b2, app->slave_div);
+        }
+        sws_read(0x007d, id, 3);
+    }
+    uint32_t ok, fail;
+    sws_link_ticks(&ok, &fail);
+    if(ok >= fail && furi_get_tick() - ok < 50) {
+        app->chip_id = id[1] | (id[2] << 8);
+        uint8_t v = 0;
+        app->halted = sws_read(0x0602, &v, 1) == 1 && v == 0x05;
+        if(!app->halted && app->auto_halt) {
+            sws_cpu_stop();
+            app->halted = sws_read(0x0602, &v, 1) == 1 && v == 0x05;
+        }
+        return LinkGood;
+    }
+    return line_check();
+}
+
 /* ---------- commands ---------- */
 
-/* sectors holding the factory MAC address (0x76000) and the RF frequency
- * calibration (0x77000): never touched by the flasher */
-#define PROTECTED_START 0x76000u
-#define PROTECTED_END   0x77FFFu
+/* Flash size from the JEDEC capacity byte, and the sectors holding the
+ * factory MAC address + RF frequency calibration, never touched by the
+ * flasher: 0x76000-0x77FFF on 512 KB parts, the last 8 KB (0xFE000 MAC
+ * 0xFF000 on 1 MB) on bigger ones. */
+typedef struct {
+    uint32_t size;
+    uint32_t prot_start;
+    uint32_t prot_end;
+} FlashGeom;
 
-static bool range_overlaps_protected(uint32_t a, uint32_t b) {
-    return a <= PROTECTED_END && b >= PROTECTED_START;
+static bool flash_geom(FlashGeom* g, uint8_t id[3]) {
+    /* the first JEDEC read after activation can be garbage: retry */
+    for(int i = 0; i < 3; i++) {
+        if(sws_flash_jedec(id) && id[2] >= 0x13 && id[2] <= 0x16) {
+            g->size = 1u << id[2];
+            if(g->size == 0x80000) {
+                g->prot_start = 0x76000u;
+                g->prot_end = 0x77FFFu;
+            } else {
+                g->prot_start = g->size - 0x2000u;
+                g->prot_end = g->size - 1u;
+            }
+            return true;
+        }
+    }
+    printf("JEDEC read failed (%02X %02X %02X) - target not halted?\r\n", id[0], id[1], id[2]);
+    return false;
+}
+
+static bool range_overlaps_protected(const FlashGeom* g, uint32_t a, uint32_t b) {
+    return a <= g->prot_end && b >= g->prot_start;
+}
+
+/* block protect bits set (SR1 BP0..BP4, or SR2 CMP) make erase/program
+ * silently do nothing: refuse instead */
+static bool flash_writable(void) {
+    uint8_t s1 = 0, s2 = 0;
+    if(!sws_flash_read_status(&s1)) {
+        printf("flash status read failed\r\n");
+        return false;
+    }
+    if(!sws_flash_read_status2(&s2) || s2 == 0xff) s2 = 0; /* no SR2 */
+    if((s1 & 0x7c) || (s2 & 0x40)) {
+        printf(
+            "flash is write protected (SR1 %02X SR2 %02X): clear it with `sws fwsr 0`\r\n", s1, s2);
+        return false;
+    }
+    return true;
 }
 
 static void cmd_pins(void) {
@@ -375,8 +491,37 @@ static void cmd_dump(App* app, PipeSide* pipe, int argc, char** argv) {
             ok = memcmp(a, b, n) == 0;
         }
         if(!ok) {
-            printf("\r\nread failed at 0x%06lX\r\n", (unsigned long)(addr + done));
-            break;
+            /* contact lost (hand-held wire): wait until the chip answers again,
+             * re-halting it in case it woke up and went back to sleep */
+            printf(
+                "\r\ncontact lost at 0x%06lX, waiting up to 10 min (Ctrl-C aborts)\r\n",
+                (unsigned long)(addr + done));
+            snprintf(app->status, sizeof(app->status), "LOST @%06lX", (unsigned long)(addr + done));
+            uint32_t tw = furi_get_tick();
+            bool back = false, abort = false;
+            while(!back && furi_get_tick() - tw < 600000) {
+                if(cli_is_pipe_broken_or_is_etx_next_char(pipe)) {
+                    abort = true;
+                    break;
+                }
+                sws_cpu_stop();
+                sws_write_u8(0x00b2, app->slave_div);
+                uint8_t id[3];
+                /* require a few consecutive good reads before resuming */
+                back = true;
+                for(int k = 0; k < 5 && back; k++)
+                    back = sws_read(0x007d, id, 3) == 3 && id[1] == 0x62 && id[2] == 0x55;
+                if(!back) furi_delay_ms(10);
+            }
+            if(!back) {
+                printf(abort ? "aborted\r\n" : "gave up\r\n");
+                break;
+            }
+            sws_write_u8(0x00b3, 0x00);
+            sws_write_u8(0x00b2, app->slave_div);
+            sws_cpu_stop();
+            printf("contact back after %lus, resuming\r\n", (unsigned long)((furi_get_tick() - tw) / 1000));
+            continue;
         }
         storage_file_write(f, a, n);
         crc = crc32_calc_buffer(crc, a, n);
@@ -422,24 +567,28 @@ static void cmd_flash(App* app, PipeSide* pipe, int argc, char** argv) {
         goto out_close;
     }
     uint32_t size = (uint32_t)fsize64;
-    if((addr + size - 1) > 0x7ffff) {
-        printf("range 0x%06lX-0x%06lX exceeds 512K flash\r\n", (unsigned long)addr, (unsigned long)(addr + size - 1));
+    uint8_t id[3] = {0};
+    FlashGeom g;
+    if(!flash_geom(&g, id)) goto out_close;
+    if((addr + size - 1) >= g.size) {
+        printf(
+            "range 0x%06lX-0x%06lX exceeds %luK flash\r\n",
+            (unsigned long)addr,
+            (unsigned long)(addr + size - 1),
+            (unsigned long)(g.size >> 10));
         goto out_close;
     }
-    if(range_overlaps_protected(addr, addr + size - 1)) {
+    if(range_overlaps_protected(&g, addr, addr + size - 1)) {
         printf(
-            "REFUSED: range 0x%06lX-0x%06lX overlaps protected area 0x76000-0x77FFF\r\n"
+            "REFUSED: range 0x%06lX-0x%06lX overlaps protected area 0x%06lX-0x%06lX\r\n"
             "(factory MAC address + RF calibration)\r\n",
             (unsigned long)addr,
-            (unsigned long)(addr + size - 1));
+            (unsigned long)(addr + size - 1),
+            (unsigned long)g.prot_start,
+            (unsigned long)g.prot_end);
         goto out_close;
     }
-
-    uint8_t id[3] = {0};
-    if(!sws_flash_jedec(id)) {
-        printf("JEDEC read failed - target not halted?\r\n");
-        goto out_close;
-    }
+    if(!flash_writable()) goto out_close;
     printf(
         "flashing %lu bytes at 0x%06lX, JEDEC %02X %02X %02X, verify %d\r\n",
         (unsigned long)size,
@@ -540,14 +689,21 @@ static void cmd_erase(App* app, PipeSide* pipe, int argc, char** argv) {
     }
     uint32_t addr = num(argv[0]), len = num(argv[1]);
     uint32_t s = addr & ~0xfffu, e = (addr + len - 1) | 0xfffu;
-    if(e > 0x7ffff) {
-        printf("range exceeds 512K flash\r\n");
+    uint8_t id[3] = {0};
+    FlashGeom g;
+    if(!flash_geom(&g, id)) return;
+    if(e >= g.size) {
+        printf("range exceeds %luK flash\r\n", (unsigned long)(g.size >> 10));
         return;
     }
-    if(range_overlaps_protected(s, e)) {
-        printf("REFUSED: overlaps protected area 0x76000-0x77FFF\r\n");
+    if(range_overlaps_protected(&g, s, e)) {
+        printf(
+            "REFUSED: overlaps protected area 0x%06lX-0x%06lX\r\n",
+            (unsigned long)g.prot_start,
+            (unsigned long)g.prot_end);
         return;
     }
+    if(!flash_writable()) return;
     uint32_t cnt = ((e - s) >> 12) + 1, done = 0;
     for(uint32_t x = s; x <= e; x += 0x1000, done++) {
         if(cli_is_pipe_broken_or_is_etx_next_char(pipe)) {
@@ -574,7 +730,8 @@ static void print_help(void) {
         "  div <n>                 slave unit divider written to [0xb2] on act\r\n"
         "  power <on|off>          target 3.3V rail\r\n"
         "  act [pin|all] [ms] [delay]  power-cycle, wait delay ms, CPU stop spam, chip id\r\n"
-        "  stop | run | reset      CPU stop / run / chip reset\r\n"
+        "  stop | run | reset      CPU stop / run / chip reset (run/reset: auto-halt off)\r\n"
+        "  autohalt [on|off]       contact monitor halts the CPU when it answers\r\n"
         "  catch [ms]              spam CPU stop (no power cycle) until halted\r\n"
         "  id                      read chip id\r\n"
         "  rd <addr> <len>         read regs/RAM\r\n"
@@ -584,8 +741,9 @@ static void print_help(void) {
         "  dbg                     edge timing of last read byte\r\n"
         "  jedec                   flash JEDEC id\r\n"
         "  frd <addr> <len>        hexdump flash\r\n"
-        "  fstat                   flash status register\r\n"
-        "  erase <addr> <len>      erase 4K sectors (refuses 0x76000-0x77FFF)\r\n"
+        "  fstat                   flash status registers (SR1, SR2)\r\n"
+        "  fwsr <sr1> [sr2]        write flash status (fwsr 0 = unprotect)\r\n"
+        "  erase <addr> <len>      erase 4K sectors (refuses MAC/calibration)\r\n"
         "  flash <path> <addr> [v]  SD file -> flash, erase+write+verify\r\n"
         "  dump <addr> <len> <path> [verify]  flash -> SD file\r\n");
 }
@@ -643,11 +801,17 @@ static void sws_cli(PipeSide* pipe, FuriString* args, void* context) {
     } else if(!strcmp(c, "stop")) {
         sws_cpu_stop();
     } else if(!strcmp(c, "run")) {
+        app->auto_halt = false; /* or the contact monitor halts it again */
         sws_cpu_run();
+        printf("running, auto-halt off\r\n");
     } else if(!strcmp(c, "reset")) {
         /* software reset of the whole chip: boots whatever is in flash */
+        app->auto_halt = false;
         sws_write_u8(0x006f, 0x20);
-        printf("reset sent\r\n");
+        printf("reset sent, auto-halt off\r\n");
+    } else if(!strcmp(c, "autohalt")) {
+        if(n >= 1) app->auto_halt = !strcmp(a[0], "on") || !strcmp(a[0], "1");
+        printf("auto-halt %s\r\n", app->auto_halt ? "on" : "off");
     } else if(!strcmp(c, "id")) {
         read_id(false);
     } else if(!strcmp(c, "rd") && n >= 2) {
@@ -670,6 +834,7 @@ static void sws_cli(PipeSide* pipe, FuriString* args, void* context) {
         bool got = false;
         while(furi_get_tick() - t0 < ms && !got) {
             sws_cpu_stop();
+            sws_write_u8(0x00b2, app->slave_div);
             uint8_t v;
             got = sws_read(0x0602, &v, 1) == 1 && v == 0x05;
         }
@@ -704,11 +869,26 @@ static void sws_cli(PipeSide* pipe, FuriString* args, void* context) {
         hexdump(addr, d, got);
         if(got != len) printf("short read: %u/%lu\r\n", (unsigned)got, (unsigned long)len);
     } else if(!strcmp(c, "fstat")) {
-        uint8_t st = 0;
+        uint8_t st = 0, st2 = 0;
+        bool ok2 = sws_flash_read_status2(&st2);
         if(sws_flash_read_status(&st))
-            printf("flash status %02X (busy %d)\r\n", st, st & 1);
+            printf(
+                "flash SR1 %02X (busy %d, WEL %d, BP %02X) SR2 %02X%s\r\n",
+                st,
+                st & 1,
+                (st >> 1) & 1,
+                (st >> 2) & 0x1f,
+                st2,
+                ok2 ? "" : " (read failed)");
         else
             printf("status read failed\r\n");
+    } else if(!strcmp(c, "fwsr") && n >= 1) {
+        uint8_t sr[2] = {(uint8_t)num(a[0]), n >= 2 ? (uint8_t)num(a[1]) : 0};
+        uint8_t st = 0, st2 = 0;
+        bool ok = sws_flash_write_status(sr, n >= 2 ? 2 : 1);
+        sws_flash_read_status(&st);
+        sws_flash_read_status2(&st2);
+        printf("%s, SR1 now %02X SR2 %02X\r\n", ok ? "written" : "timeout", st, st2);
     } else if(!strcmp(c, "erase") && n >= 2) {
         cmd_erase(app, pipe, n, a);
     } else if(!strcmp(c, "flash")) {
@@ -726,15 +906,49 @@ out:
 
 static void draw_cb(Canvas* canvas, void* ctx) {
     App* app = ctx;
+    char line[40];
     canvas_clear(canvas);
-    canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Telink SWS");
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 26, "CLI command 'sws' active");
-    canvas_draw_str(canvas, 2, 38, "SWS pin:");
-    canvas_draw_str(canvas, 50, 38, pin_name(sws_get_pin()));
+    snprintf(line, sizeof(line), "Telink SWS  pin %s", pin_name(sws_get_pin()));
+    canvas_draw_str(canvas, 2, 9, line);
+
+    static const char* const names[] = {
+        [LinkNone] = "NO CONTACT",
+        [LinkLow] = "LINE LOW",
+        [LinkPad] = "PAD, NO REPLY",
+        [LinkGood] = "CONTACT OK",
+    };
+    LinkState link = app->link;
+    canvas_set_font(canvas, FontPrimary);
+    if(link == LinkGood) {
+        canvas_draw_box(canvas, 0, 13, 128, 15);
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_str_aligned(canvas, 64, 21, AlignCenter, AlignCenter, names[link]);
+        canvas_set_color(canvas, ColorBlack);
+    } else {
+        canvas_draw_frame(canvas, 0, 13, 128, 15);
+        canvas_draw_str_aligned(canvas, 64, 21, AlignCenter, AlignCenter, names[link]);
+    }
+
+    canvas_set_font(canvas, FontSecondary);
+    if(link == LinkGood && !app->busy)
+        snprintf(
+            line,
+            sizeof(line),
+            "chip %04X %s  %lu%%",
+            app->chip_id,
+            app->halted ? "halted" : "running",
+            (unsigned long)(app->total_probes ? app->good_probes * 100 / app->total_probes : 0));
+    else if(link == LinkPad)
+        snprintf(line, sizeof(line), "asleep? press a button");
+    else if(app->busy)
+        snprintf(line, sizeof(line), "busy (CLI)");
+    else
+        line[0] = 0;
+    canvas_draw_str(canvas, 2, 39, line);
     canvas_draw_str(canvas, 2, 50, app->status);
-    canvas_draw_str(canvas, 2, 62, "Back = exit");
+    snprintf(line, sizeof(line), "OK: auto-halt %s", app->auto_halt ? "ON" : "off");
+    canvas_draw_str(canvas, 2, 61, line);
 }
 
 static void input_cb(InputEvent* ev, void* ctx) {
@@ -747,6 +961,8 @@ int32_t telink_sws_app(void* p) {
     app->lock = furi_mutex_alloc(FuriMutexTypeNormal);
     app->slave_div = 0x40;
     app->act_ms = 500;
+    app->auto_halt = true;
+    app->link = LinkNone;
     strlcpy(app->status, "idle", sizeof(app->status));
 
     sws_set_unit_ns(2000);
@@ -763,13 +979,59 @@ int32_t telink_sws_app(void* p) {
     Gui* gui = furi_record_open(RECORD_GUI);
     gui_add_view_port(gui, vp, GuiLayerFullscreen);
 
+    NotificationApp* notif = furi_record_open(RECORD_NOTIFICATION);
+    static const NotificationSequence seq_gain = {
+        &message_note_c7, &message_delay_50, &message_sound_off, NULL};
+    static const NotificationSequence seq_lost = {
+        &message_note_c5, &message_delay_100, &message_sound_off, NULL};
+    static const NotificationSequence* const leds[] = {
+        [LinkNone] = &sequence_set_only_red_255,
+        [LinkLow] = &sequence_set_only_red_255,
+        [LinkPad] = &sequence_set_only_blue_255,
+        [LinkGood] = &sequence_set_only_green_255,
+    };
+    LinkState shown = LinkNone;
+    notification_message(notif, leds[shown]);
+
     InputEvent ev;
     while(true) {
-        if(furi_message_queue_get(q, &ev, 500) == FuriStatusOk) {
+        if(furi_message_queue_get(q, &ev, 50) == FuriStatusOk) {
             if(ev.type == InputTypeShort && ev.key == InputKeyBack) break;
+            if(ev.type == InputTypeShort && ev.key == InputKeyOk) app->auto_halt = !app->auto_halt;
+        }
+        /* probe while the bus is free; while a command runs, follow its reads */
+        if(furi_mutex_acquire(app->lock, 0) == FuriStatusOk) {
+            app->busy = false;
+            app->link = link_probe(app);
+            furi_mutex_release(app->lock);
+            app->total_probes++;
+            if(app->link == LinkGood) app->good_probes++;
+            if(app->total_probes >= 40) { /* contact quality over the last ~2-4 s */
+                app->total_probes /= 2;
+                app->good_probes /= 2;
+            }
+        } else {
+            app->busy = true;
+            uint32_t ok, fail;
+            sws_link_ticks(&ok, &fail);
+            if(ok >= fail && furi_get_tick() - ok < 1000)
+                app->link = LinkGood;
+            else if(fail > ok)
+                app->link = LinkNone;
+        }
+        LinkState now = app->link;
+        if(now != shown) {
+            notification_message(notif, leds[now]);
+            if(now == LinkGood)
+                notification_message(notif, &seq_gain);
+            else if(shown == LinkGood)
+                notification_message(notif, &seq_lost);
+            shown = now;
         }
         view_port_update(vp);
     }
+    notification_message(notif, &sequence_reset_rgb);
+    furi_record_close(RECORD_NOTIFICATION);
 
     /* wait for a running command to finish, then unregister */
     furi_mutex_acquire(app->lock, FuriWaitForever);

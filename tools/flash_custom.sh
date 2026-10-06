@@ -3,7 +3,7 @@
 # See AGENTS.md ("Flash" under the custom firmware task) for the full procedure.
 #
 # Prerequisites:
-#   - custom firmware built:  custom_fw/bin/ZG228Z.bin   (docker build, see AGENTS.md)
+#   - custom firmware built:  custom_fw/zg226z/bin/ZG228Z.bin   (docker build, see custom_fw/zg226z/DETAILS.md)
 #   - ZG-226Z wired to the Flipper: SWS -> C0, GND -> GND, 3V3 rail ON
 #   - stock dump backed up already (dumps/private/zg226z_full.bin) for rollback
 #
@@ -14,7 +14,7 @@ PORT=/dev/cu.usbmodemflip_Ngxson1
 PY=".ufbt/toolchain/current/bin/python3"
 STORAGE=".ufbt/current/scripts/storage.py"
 FCLI="python3 tools/fcli.py"
-BIN="${1:-custom_fw/bin/ZG228Z.bin}"
+BIN="${1:-custom_fw/zg226z/bin/ZG228Z.bin}"
 
 [ -f "$BIN" ] || { echo "missing $BIN (build it first)"; exit 1; }
 

@@ -42,6 +42,8 @@ size_t sws_read_fifo(uint32_t addr, uint8_t* data, size_t len);
 void sws_write_u8(uint32_t addr, uint8_t v);
 
 const SwsRxDebug* sws_last_rx_debug(void);
+/* furi ticks of the last fully successful / failed sws_read() */
+void sws_link_ticks(uint32_t* last_ok, uint32_t* last_fail);
 
 /* Target (TLSR825x) helpers */
 void sws_cpu_stop(void);
@@ -51,6 +53,11 @@ bool sws_flash_jedec(uint8_t id[3]);
 
 /* Flash erase/write (SPI master flow, CPU halted) */
 bool sws_flash_read_status(uint8_t* st);
+/* status register 2 (0x35; GigaDevice/Winbond: bit6 CMP, bit1 QE) */
+bool sws_flash_read_status2(uint8_t* st);
+/* write status register(s) (0x01) with n = 1 or 2 bytes (SR1, SR2).
+ * The ZT3L flash (GD C8 60 14) ignores the 2-byte form: use n = 1. */
+bool sws_flash_write_status(const uint8_t* sr, size_t n);
 bool sws_flash_busy(void);
 void sws_flash_write_enable(void);
 bool sws_flash_wait_ready(uint32_t timeout_ms);

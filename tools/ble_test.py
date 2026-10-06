@@ -11,7 +11,7 @@ then run:
 
 Needs `pip install bleak` (in a venv - nothing is installed system wide).
 
-Protocol (see custom_fw/src/app_ble.c):
+Protocol (see custom_fw/zg226z/src/app_ble.c):
   - service  UUID 128-bit base ...FFE0
   - char FFE1 "play":  write chunks of the RTTTL string; every write appends.
     A 0x00 byte terminates the string -> the device plays it.
