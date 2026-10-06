@@ -6,6 +6,8 @@ This allows reflashing TLSR chips, namely cheap Tuya devices.
 
 This project is highly vibe-coded, refer to `AGENTS.md` for more info.
 
+![Flipper Zero wired to a ZG-226Z board over SWS](demo.jpg)
+
 ## How to use it
 
 Compile flipper app in `telink_sws` with [ufbt](https://github.com/flipperdevices/flipperzero-ufbt) (SDK must match your firmware API): `cd telink_sws && ufbt launch`
