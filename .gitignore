@@ -1,0 +1,23 @@
+.ufbt
+.vscode
+.DS_Store
+
+# build outputs
+dist
+__pycache__/
+*.pyc
+*.o
+*.elf
+*.fap
+*.map
+*.lst
+custom_fw/build
+custom_fw/bin
+custom_fw/tools
+custom_fw/tc32_gcc_v2.0.tar.bz2
+
+# raw dumps contain Zigbee network keys: never commit
+dumps/private
+# only the sanitized dumps in dumps/ may be committed
+*.bin
+!dumps/*.bin
