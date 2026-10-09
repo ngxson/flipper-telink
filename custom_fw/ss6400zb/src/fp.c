@@ -102,7 +102,7 @@ static u8 manualOn;
 
 /* RX ring, filled by the UART irq */
 #define RX_RING		256
-static volatile u8 rxRing[RX_RING];
+static volatile _attribute_custom_bss_ u8 rxRing[RX_RING];	/* service mode only */
 static volatile u16 rxHead;
 static u16 rxTail;
 static volatile u16 rxErr;

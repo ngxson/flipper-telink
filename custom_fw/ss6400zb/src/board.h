@@ -12,7 +12,7 @@
 #define PD7_INPUT_ENABLE		0
 #define PD7_DATA_OUT			LED_OFF
 
-/* buttons: not used yet, kept as inputs with pull-ups so they don't float */
+/* buttons: inputs with 10k pull-ups, active low */
 #define BUTTON1					GPIO_PA0
 #define PA0_FUNC				AS_GPIO
 #define PA0_OUTPUT_ENABLE		0
@@ -36,6 +36,27 @@
 #define PC3_OUTPUT_ENABLE		0
 #define PC3_INPUT_ENABLE		1
 #define PULL_WAKEUP_SRC_PC3		PM_PIN_PULLUP_10K
+
+/* TS0046 (6-button remote, same ZT3L module): bt4 = PC4, bt5 = PB4, bt6 = PC0.
+ * The layout is picked at boot from the Tuya factory config at 0xF8000
+ * (ch_num, see buttons.c), so one image drives both remotes */
+#define BUTTON4_TS0046			GPIO_PC4
+#define PC4_FUNC				AS_GPIO
+#define PC4_OUTPUT_ENABLE		0
+#define PC4_INPUT_ENABLE		1
+#define PULL_WAKEUP_SRC_PC4		PM_PIN_PULLUP_10K
+
+#define BUTTON5_TS0046			GPIO_PB4
+#define PB4_FUNC				AS_GPIO
+#define PB4_OUTPUT_ENABLE		0
+#define PB4_INPUT_ENABLE		1
+#define PULL_WAKEUP_SRC_PB4		PM_PIN_PULLUP_10K
+
+#define BUTTON6_TS0046			GPIO_PC0
+#define PC0_FUNC				AS_GPIO
+#define PC0_OUTPUT_ENABLE		0
+#define PC0_INPUT_ENABLE		1
+#define PULL_WAKEUP_SRC_PC0		PM_PIN_PULLUP_10K
 
 /* HLK-ZW101 fingerprint module (pads: TX=L1, RX=L2, D4=L6, D2=R5)
  * UART PB1 -> module RX, PB7 <- module TX: floating inputs while the module
@@ -65,5 +86,14 @@
 #define PD2_OUTPUT_ENABLE		0
 #define PD2_INPUT_ENABLE		1
 #define PULL_WAKEUP_SRC_PD2		PM_PIN_PULLDOWN_100K
+
+/* battery voltage: PC5 is not on any ZT3L pad, so drive it high and read it
+ * back with the ADC (= VDD, the pvvx/BZdevice "VBAT trick"). Only driven
+ * while measuring (zb_dev.c), an input with no pull otherwise */
+#define SHL_ADC_VBAT			C5P
+#define GPIO_VBAT				GPIO_PC5
+#define PC5_FUNC				AS_GPIO
+#define PC5_OUTPUT_ENABLE		0
+#define PC5_INPUT_ENABLE		0
 
 #endif

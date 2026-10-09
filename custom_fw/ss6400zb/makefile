@@ -4,8 +4,8 @@ VERSION_BIN ?=
 
 TEL_CHIP := $(POJECT_DEF) -DMCU_CORE_8258=1 -DEND_DEVICE=1 -DMCU_STARTUP_8258=1 -D__PROJECT_TL_SWITCH__=1 -DBLE_CONCURRENT_MODE=1 -DBOOT_LOADER_MODE=0 
 
-# BLE only for now: no Zigbee stack library
-LIBS := -lble_8258 -ldrivers_8258
+# BLE (service mode) + Zigbee end device (normal mode)
+LIBS := -lble_8258 -ldrivers_8258 -lzb_ed
 
 PGM_PORT?=COM9
 
@@ -105,13 +105,14 @@ INCLUDE_PATHS := -I$(SRC_PATH) -I$(SRC_PATH)/includes -I$(SRC_PATH)/common  -I$(
 
 GCC_FLAGS += $(TEL_CHIP)
 
-LS_INCLUDE := -L$(SDK_PATH)/platform/lib -L$(SDK_PATH)/stack/ble/lib -L$(OUT_PATH)
+LS_INCLUDE := -L$(SDK_PATH)/platform/lib -L$(SDK_PATH)/stack/zigbee/lib/tc32 -L$(SDK_PATH)/stack/ble/lib -L$(OUT_PATH)
 
 #include Project makefile
 -include $(MAKE_PATH)/src.mk
 #include SDK makefile
 -include $(MAKE_PATH)/platform.mk
 -include $(MAKE_PATH)/proj.mk
+-include $(MAKE_PATH)/zigbee.mk
 #-include $(MAKE_PATH)/zbhci.mk
 
 # Add inputs and outputs from these tool invocations to the build variables

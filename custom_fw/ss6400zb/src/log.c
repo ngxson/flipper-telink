@@ -5,7 +5,9 @@
 #include <stdarg.h>
 #include "log.h"
 
-static u8 logBuf[LOG_BUF_SIZE];
+/* outside the retention area: the log is only read in service mode,
+ * which never deep sleeps (in Zigbee mode it is write-only scratch) */
+static _attribute_custom_bss_ u8 logBuf[LOG_BUF_SIZE];
 static u32 logHead;		/* total bytes written */
 static u32 logBase;		/* first byte still valid (after a clear) */
 

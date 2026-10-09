@@ -133,9 +133,10 @@ static const attribute_t my_Attributes[] = {
 	{0, ATT_PERMISSIONS_RDWR, 16, sizeof(dbgCmdVal), (u8*)(my_dbgCmdUUID), (&dbgCmdVal), &app_dbgCmdWrite, NULL},
 };
 
-_attribute_data_retention_ u8 blt_rxfifo_b[RX_FIFO_SIZE * RX_FIFO_NUM] = {0};
+/* service mode only (never deep sleeps): outside the retention area */
+_attribute_custom_bss_ u8 blt_rxfifo_b[RX_FIFO_SIZE * RX_FIFO_NUM];
 _attribute_data_retention_ my_fifo_t blt_rxfifo = {RX_FIFO_SIZE, RX_FIFO_NUM, 0, 0, blt_rxfifo_b};
-_attribute_data_retention_ u8 blt_txfifo_b[TX_FIFO_SIZE * TX_FIFO_NUM] = {0};
+_attribute_custom_bss_ u8 blt_txfifo_b[TX_FIFO_SIZE * TX_FIFO_NUM];
 _attribute_data_retention_ my_fifo_t blt_txfifo = {TX_FIFO_SIZE, TX_FIFO_NUM, 0, 0, blt_txfifo_b};
 
 u8 g_ble_txPowerSet = BLE_DEFAULT_TX_POWER_IDX;

@@ -15,7 +15,7 @@ Notes for agents working on this repo: a Flipper Zero app that bit-bangs Telink'
 | `dumps/private/` | Original raw dumps with network key / link keys. **Gitignored, never commit or publish** |
 | `tools/sanitize_dump.py` | Blank the Zigbee NV modules (keys, PAN, addresses) and the Tuya credentials sector (auzKey etc., ZT3L 0xFB000) in a dump; refuses to write if any of them survives |
 | `.ufbt/` | Project-local ufbt home with the SDK that matches the Flipper firmware (gitignored) |
-| `custom_fw/` | Custom firmware, one subdirectory per device: `custom_fw/zg226z/` (ZG-226Z alarm, details in its `DETAILS.md`) and `custom_fw/ss6400zb/` (Tuya TS0044 remote: RE notes + BLE bring-up/OTA firmware, see its `README.md`; it builds against `custom_fw/zg226z/SDK`). Telink Zigbee+BLE SDK + build files taken from pvvx/BZdevice, plus a Docker toolchain |
+| `custom_fw/` | Custom firmware, one subdirectory per device: `custom_fw/zg226z/` (ZG-226Z alarm, details in its `DETAILS.md`) and `custom_fw/ss6400zb/` (Tuya TS0044/TS0046 remote: RE notes + Zigbee firmware that Z2M sees as the stock TS0044/TS0046, BLE service mode for OTA, see its `README.md`; it builds against `custom_fw/zg226z/SDK`). Telink Zigbee+BLE SDK + build files taken from pvvx/BZdevice, plus a Docker toolchain |
 
 ## Build and run
 
@@ -45,6 +45,24 @@ While the app is open, the GUI thread probes the target every ~50 ms when no CLI
 Flipper pins: `c0` = PC0 (header pin 16, ADC1_IN1), `c1` = PC1 (pin 15, IN2), `c3` = PC3 (pin 7, IN4). 3V3 is header pin 9.
 
 **Flash write protection:** the stock Tuya firmware on the TS0044 left SR1 = `0x1C` (BP0–BP2, whole chip protected). Erase and program are then silently ignored: the only symptom is WEL staying set and the data unchanged. Clear it with `sws fwsr 0`. That GD `C8 60 14` part ignores the two-byte WRSR (`fwsr 0 0`), so use the one-byte form. Check `fstat` before writing to any new device.
+
+How it was unlocked on the TS0044 (CPU halted, `[0x602]` reads `05`):
+```
+sws fstat          # SR1 1E: BP=7 (whole chip) + WEL stuck at 1 from the failed erase, SR2 00
+sws fwsr 0         # one-byte WRSR -> SR1 00. `fwsr 0 0` (two bytes) was silently ignored
+sws fstat          # SR1 00 (BP 00), now erase/flash work
+sws erase 0 0x40000
+sws flash /ext/SS6400ZB.bin 0 1
+sws run
+```
+If `fwsr` misbehaves, drive the SPI master by hand (`[0x0d]` = CS: 1 high / 0 low, `[0x0c]` = data byte):
+```
+sws wr 0x0d 1; sws wr 0x0d 0; sws wr 0x0c 4; sws wr 0x0d 1     # WRDI: WEL should clear (single-byte commands work?)
+sws wr 0x0d 1; sws wr 0x0d 0; sws wr 0x0c 6; sws wr 0x0d 1     # WREN: WEL set
+sws wr 0x0d 1; sws wr 0x0d 0; sws wr 0x0c 1; sws wr 0x0c 0; sws wr 0x0d 1   # WRSR 0x00
+sws fstat
+```
+(write each `sws ...` as its own CLI line). That is how the one-byte vs two-byte WRSR difference was found. Erase/flash now refuse while BP bits are set, so a protected chip can't silently waste a flash run. Our own firmware never sets the protection again.
 
 Relaunching the app turns auto-halt back on, so it halts a running target again. Follow with `sws run`.
 

@@ -18,7 +18,7 @@
  * firmware revision characteristic shows which one is running */
 #define APP_RELEASE						0x00
 #ifndef APP_BUILD
-#define APP_BUILD						0x08
+#define APP_BUILD						0x0E
 #endif
 #define STACK_RELEASE					0x30
 #define STACK_BUILD						0x01
