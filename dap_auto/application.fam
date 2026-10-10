@@ -1,0 +1,25 @@
+App(
+    appid="dap_link_auto",
+    name="DAP Link Auto",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="dap_link_app",
+    requires=[
+        "gui",
+        "dialogs",
+    ],
+    stack_size=4 * 1024,
+    fap_description="CMSIS-DAP probe with SWD pin auto-detect (wire SWDIO/SWCLK to any GPIO)",
+    fap_version="1.5",
+    fap_icon="dap_link.png",
+    fap_category="GPIO",
+    fap_private_libs=[
+        Lib(
+            name="free-dap",
+            cincludes=["."],
+            sources=[
+                "dap.c",
+            ],
+        ),
+    ],
+    fap_icon_assets="icons",
+)

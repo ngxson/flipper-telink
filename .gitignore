@@ -16,6 +16,11 @@ custom_fw/*/bin
 custom_fw/*/tools
 custom_fw/*/tc32_gcc_v2.0.tar.bz2
 
+# Free-DAP extras unused by the Flipper app (keep dap.c, dap.h and license)
+/dap_auto/lib/free-dap/bin/
+/dap_auto/lib/free-dap/hardware/
+/dap_auto/lib/free-dap/platform/
+
 # raw dumps contain Zigbee network keys: never commit
 dumps/private
 # only the sanitized dumps in dumps/ may be committed
