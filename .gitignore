@@ -26,3 +26,5 @@ dumps/private
 # only the sanitized dumps in dumps/ may be committed
 *.bin
 !dumps/*.bin
+
+/tmp
