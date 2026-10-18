@@ -1,5 +1,7 @@
 # Telink flasher via Flipper Zero
 
+<img src="telink_sws/artwork/sws-logo-preview.png" alt="SWS microchip logo" width="320">
+
 This is a Telink flasher using bitbang, can run on Flipper Zero.
 
 This allows reflashing TLSR chips, namely cheap Tuya devices.
