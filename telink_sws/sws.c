@@ -128,6 +128,11 @@ static bool rx_byte(uint8_t* out) {
     uint32_t start = cyc();
     const uint32_t first_to = 400u * CPU_MHZ; /* 400 us for the slave to begin */
     const uint32_t edge_to = 200u * CPU_MHZ; /* max 200 us between edges */
+    /* The released request pulse can still read low briefly. Wait for its
+     * rising edge so that it is not decoded as an extra leading zero bit. */
+    while(!pin_rd()) {
+        if(cyc() - start > first_to) goto done;
+    }
     uint32_t last = start;
     for(n = 0; n < 9; n++) {
         uint32_t to = (n == 0) ? first_to : edge_to;
